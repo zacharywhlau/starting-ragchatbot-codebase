@@ -9,7 +9,7 @@ class AIGenerator:
 
 Search Tool Usage:
 - Use the search tool **only** for questions about specific course content or detailed educational materials
-- **One search per query maximum**
+- **Up to 2 sequential searches per query** — use a second search when the first reveals you need more specific information (e.g., get a course outline first, then search for a specific lesson topic)
 - Synthesize search results into accurate, fact-based responses
 - If search yields no results, state this clearly without offering alternatives
 - Use **get_course_outline** for questions about a course's structure, syllabus, or lesson list
@@ -32,7 +32,7 @@ Provide only the direct answer to what was asked.
 """
     
     # Safety cap on how many tool-use rounds a single query may trigger
-    MAX_TOOL_ROUNDS = 5
+    MAX_TOOL_ROUNDS = 2
 
     def __init__(self, api_key: str, model: str, base_url: Optional[str] = None):
         client_kwargs = {"api_key": api_key}
@@ -88,8 +88,11 @@ Provide only the direct answer to what was asked.
             response = self.client.messages.create(**api_params)
 
             if response.stop_reason == "tool_use" and tool_manager:
+                tool_results, had_error = self._run_tools(response, tool_manager)
                 messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": self._run_tools(response, tool_manager)})
+                messages.append({"role": "user", "content": tool_results})
+                if had_error:
+                    break
                 continue
 
             return self._extract_text(response)
@@ -102,21 +105,26 @@ Provide only the direct answer to what was asked.
         })
         return self._extract_text(final_response)
 
-    def _run_tools(self, response, tool_manager) -> List[Dict[str, Any]]:
-        """Execute every tool_use block in a response and return the tool_result blocks."""
+    def _run_tools(self, response, tool_manager) -> tuple[List[Dict[str, Any]], bool]:
+        """Execute every tool_use block in a response and return (tool_result blocks, had_error)."""
         tool_results = []
+        had_error = False
         for content_block in response.content:
             if content_block.type == "tool_use":
-                tool_result = tool_manager.execute_tool(
-                    content_block.name,
-                    **content_block.input
-                )
+                try:
+                    tool_result = tool_manager.execute_tool(
+                        content_block.name,
+                        **content_block.input
+                    )
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                    had_error = True
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": content_block.id,
                     "content": tool_result
                 })
-        return tool_results
+        return tool_results, had_error
 
     def _extract_text(self, response) -> str:
         """Join all text blocks, with a fallback if the model returned none."""

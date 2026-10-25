@@ -44,7 +44,6 @@ Provide only the direct answer to what was asked.
         # Pre-build base API parameters
         self.base_params = {
             "model": self.model,
-            "temperature": 0,
             "max_tokens": 2048
         }
     

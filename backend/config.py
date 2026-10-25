@@ -8,9 +8,10 @@ load_dotenv()
 @dataclass
 class Config:
     """Configuration settings for the RAG system"""
-    # Anthropic API settings
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    # Anthropic API settings (Poe exposes an Anthropic-compatible API at api.poe.com)
+    ANTHROPIC_API_KEY: str = os.getenv("POE_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
+    ANTHROPIC_MODEL: str = "claude-haiku-4-5"
     
     # Embedding model settings
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"

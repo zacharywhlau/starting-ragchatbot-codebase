@@ -12,10 +12,12 @@ Search Tool Usage:
 - **One search per query maximum**
 - Synthesize search results into accurate, fact-based responses
 - If search yields no results, state this clearly without offering alternatives
+- Use **get_course_outline** for questions about a course's structure, syllabus, or lesson list
 
 Response Protocol:
 - **General knowledge questions**: Answer using existing knowledge without searching
 - **Course-specific questions**: Search first, then answer
+- **Outline queries** (e.g. "what lessons are in X", "show me the syllabus for X"): call get_course_outline, then return the course title, course link, and a numbered list of all lesson titles — include every lesson, no truncation
 - **No meta-commentary**:
  - Provide direct answers only — no reasoning process, search explanations, or question-type analysis
  - Do not mention "based on the search results"
@@ -29,15 +31,21 @@ All responses must be:
 Provide only the direct answer to what was asked.
 """
     
-    def __init__(self, api_key: str, model: str):
-        self.client = anthropic.Anthropic(api_key=api_key)
+    # Safety cap on how many tool-use rounds a single query may trigger
+    MAX_TOOL_ROUNDS = 5
+
+    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None):
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = anthropic.Anthropic(**client_kwargs)
         self.model = model
-        
+
         # Pre-build base API parameters
         self.base_params = {
             "model": self.model,
             "temperature": 0,
-            "max_tokens": 800
+            "max_tokens": 2048
         }
     
     def generate_response(self, query: str,
@@ -60,76 +68,61 @@ Provide only the direct answer to what was asked.
         # Build system content efficiently - avoid string ops when possible
         system_content = (
             f"{self.SYSTEM_PROMPT}\n\nPrevious conversation:\n{conversation_history}"
-            if conversation_history 
+            if conversation_history
             else self.SYSTEM_PROMPT
         )
-        
-        # Prepare API call parameters efficiently
-        api_params = {
+
+        messages = [{"role": "user", "content": query}]
+
+        # Tool-use loop: keep answering tool calls until the model stops
+        # requesting them (bounded so a runaway loop can't spin forever)
+        for _ in range(self.MAX_TOOL_ROUNDS):
+            api_params = {
+                **self.base_params,
+                "messages": messages,
+                "system": system_content
+            }
+            if tools:
+                api_params["tools"] = tools
+                api_params["tool_choice"] = {"type": "auto"}
+
+            response = self.client.messages.create(**api_params)
+
+            if response.stop_reason == "tool_use" and tool_manager:
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": self._run_tools(response, tool_manager)})
+                continue
+
+            return self._extract_text(response)
+
+        # Tool rounds exhausted - make one final request for a text answer
+        final_response = self.client.messages.create(**{
             **self.base_params,
-            "messages": [{"role": "user", "content": query}],
+            "messages": messages,
             "system": system_content
-        }
-        
-        # Add tools if available
-        if tools:
-            api_params["tools"] = tools
-            api_params["tool_choice"] = {"type": "auto"}
-        
-        # Get response from Claude
-        response = self.client.messages.create(**api_params)
-        
-        # Handle tool execution if needed
-        if response.stop_reason == "tool_use" and tool_manager:
-            return self._handle_tool_execution(response, api_params, tool_manager)
-        
-        # Return direct response
-        return response.content[0].text
-    
-    def _handle_tool_execution(self, initial_response, base_params: Dict[str, Any], tool_manager):
-        """
-        Handle execution of tool calls and get follow-up response.
-        
-        Args:
-            initial_response: The response containing tool use requests
-            base_params: Base API parameters
-            tool_manager: Manager to execute tools
-            
-        Returns:
-            Final response text after tool execution
-        """
-        # Start with existing messages
-        messages = base_params["messages"].copy()
-        
-        # Add AI's tool use response
-        messages.append({"role": "assistant", "content": initial_response.content})
-        
-        # Execute all tool calls and collect results
+        })
+        return self._extract_text(final_response)
+
+    def _run_tools(self, response, tool_manager) -> List[Dict[str, Any]]:
+        """Execute every tool_use block in a response and return the tool_result blocks."""
         tool_results = []
-        for content_block in initial_response.content:
+        for content_block in response.content:
             if content_block.type == "tool_use":
                 tool_result = tool_manager.execute_tool(
-                    content_block.name, 
+                    content_block.name,
                     **content_block.input
                 )
-                
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": content_block.id,
                     "content": tool_result
                 })
-        
-        # Add tool results as single message
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-        
-        # Prepare final API call without tools
-        final_params = {
-            **self.base_params,
-            "messages": messages,
-            "system": base_params["system"]
-        }
-        
-        # Get final response
-        final_response = self.client.messages.create(**final_params)
-        return final_response.content[0].text
+        return tool_results
+
+    def _extract_text(self, response) -> str:
+        """Join all text blocks, with a fallback if the model returned none."""
+        text = "".join(
+            block.text for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+        return text or "I wasn't able to generate a response for that query. Please try rephrasing it."

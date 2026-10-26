@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync)",
+      "Bash(uv run uvicorn*)",
+      "Bash(uv run pytest*)",
+      "Bash(uv run npm run lint)",
+      "Bash(./run.sh)",
+      "Bash(uv run python*)"
+    ]
+  }
+}

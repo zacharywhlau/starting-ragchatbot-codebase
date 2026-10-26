@@ -96,3 +96,72 @@ def make_tool_use_response_fixture():
 def make_text_block_fixture():
     """Fixture to create text blocks."""
     return make_text_block
+
+
+@pytest.fixture
+def mock_rag_system():
+    """Mocked RAGSystem for API endpoint tests."""
+    rag = MagicMock()
+    rag.query.return_value = ("Test answer", [])
+    rag.get_course_analytics.return_value = {
+        "total_courses": 2,
+        "course_titles": ["Course A", "Course B"],
+    }
+    rag.session_manager.create_session.return_value = "session_1"
+    return rag
+
+
+@pytest.fixture
+def test_client(mock_rag_system):
+    """FastAPI TestClient with mocked RAGSystem; no static files mounted."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from pydantic import BaseModel
+    from typing import List, Optional
+
+    test_app = FastAPI()
+
+    class QueryRequest(BaseModel):
+        query: str
+        session_id: Optional[str] = None
+
+    class Source(BaseModel):
+        text: str
+        link: Optional[str] = None
+
+    class QueryResponse(BaseModel):
+        answer: str
+        sources: List[Source]
+        session_id: str
+
+    class CourseStats(BaseModel):
+        total_courses: int
+        course_titles: List[str]
+
+    @test_app.post("/api/query", response_model=QueryResponse)
+    async def query_documents(request: QueryRequest):
+        try:
+            session_id = request.session_id
+            if not session_id:
+                session_id = mock_rag_system.session_manager.create_session()
+            answer, sources = mock_rag_system.query(request.query, session_id)
+            return QueryResponse(answer=answer, sources=sources, session_id=session_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @test_app.get("/api/courses", response_model=CourseStats)
+    async def get_course_stats():
+        try:
+            analytics = mock_rag_system.get_course_analytics()
+            return CourseStats(
+                total_courses=analytics["total_courses"],
+                course_titles=analytics["course_titles"],
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @test_app.get("/")
+    async def root():
+        return {"status": "ok"}
+
+    return TestClient(test_app)
